@@ -1,0 +1,142 @@
+import { NextResponse } from 'next/server';
+import connectToDatabase from '@/lib/mongodb';
+import Appliance from '@/models/Appliance';
+import User from '@/models/User';
+import Usage from '@/models/Usage';
+import { auth } from '@/lib/auth';
+
+const UNIT_RATE = 0.12;
+
+function getHoursUsedToday(startTime, endTime) {
+  const now = new Date();
+  const currentVal = now.getHours() * 60 + now.getMinutes();
+  
+  const [startH, startM] = startTime.split(':').map(Number);
+  const [endH, endM] = endTime.split(':').map(Number);
+  const startVal = startH * 60 + startM;
+  const endVal = endH * 60 + endM;
+
+  let minutesToday = 0;
+
+  if (startVal < endVal) {
+    // Same day: e.g., 08:00 - 18:00
+    const activeStart = startVal;
+    const activeEnd = Math.min(endVal, currentVal); 
+    if (activeEnd > activeStart) {
+      minutesToday = activeEnd - activeStart;
+    }
+  } else {
+    // Overnight: e.g., 22:00 - 06:00
+    // Segment 1: Midnight today until endVal (e.g. 00:00 to 06:00)
+    const segment1End = Math.min(endVal, currentVal);
+    if (segment1End > 0) {
+      minutesToday += segment1End;
+    }
+    
+    // Segment 2: StartVal until midnight tonight (only if currently at or after startVal)
+    if (currentVal >= startVal) {
+      minutesToday += (currentVal - startVal);
+    }
+  }
+  
+  return minutesToday / 60;
+}
+
+function isApplianceRunning(appliance) {
+  if (!appliance.isActive) return false;
+  
+  const now = new Date();
+  const currentVal = now.getHours() * 60 + now.getMinutes();
+  
+  const [startH, startM] = appliance.startTime.split(':').map(Number);
+  const [endH, endM] = appliance.endTime.split(':').map(Number);
+  
+  const startVal = startH * 60 + startM;
+  const endVal = endH * 60 + endM;
+  
+  if (startVal < endVal) {
+    return currentVal >= startVal && currentVal < endVal;
+  } else {
+    return currentVal >= startVal || currentVal < endVal;
+  }
+}
+
+export async function GET() {
+  const session = await auth();
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  await connectToDatabase();
+  try {
+    const user = await User.findById(session.user.id).select('unitRate monthlyBudget');
+    const unitRate = user?.unitRate || 0.12;
+    const monthlyBudget = user?.monthlyBudget || 100;
+
+    // Calculate monthly spent
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const monthlyRecords = await Usage.find({ 
+      userId: session.user.id, 
+      timestamp: { $gte: startOfMonth } 
+    }).select('cost');
+    
+    const historicalMonthlySpent = monthlyRecords.reduce((acc, r) => acc + (r.cost || 0), 0);
+
+    const appliances = await Appliance.find({ userId: session.user.id });
+    let totalWattage = 0;
+    let todayCost = 0;
+    const activeNames = [];
+
+    appliances.forEach(app => {
+      // 1. Calculate cumulative cost since midnight
+      if (app.isActive) {
+        const hoursToday = getHoursUsedToday(app.startTime, app.endTime);
+        todayCost += (app.wattage / 1000) * hoursToday * unitRate;
+      }
+
+      // 2. Calculate instantaneous wattage for live graph
+      if (isApplianceRunning(app)) {
+        const fluctuation = 0.8 + (Math.random() * 0.4);
+        const currentUsage = app.wattage * fluctuation;
+        totalWattage += currentUsage;
+        activeNames.push(app.name);
+      }
+    });
+
+    const currentKw = totalWattage / 1000;
+
+    // Background Logging: Save a snapshot every 5 minutes if logging is active
+    try {
+      const lastLog = await Usage.findOne({ userId: session.user.id }).sort({ timestamp: -1 });
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+      
+      if (!lastLog || lastLog.timestamp < fiveMinutesAgo) {
+        await Usage.create({
+          userId: session.user.id,
+          totalKw: parseFloat(currentKw.toFixed(2)),
+          cost: parseFloat(todayCost.toFixed(2)),
+          timestamp: new Date()
+        });
+      }
+    } catch (logErr) {
+      console.error('Background logging failed:', logErr);
+    }
+
+    const totalMonthlySpent = historicalMonthlySpent + parseFloat(todayCost);
+    const budgetProgress = Math.min((totalMonthlySpent / monthlyBudget) * 100, 100);
+
+    return NextResponse.json({
+      kw: currentKw.toFixed(2),
+      timestamp: new Date().toISOString(),
+      activeCount: activeNames.length,
+      activeNames,
+      todayCost: todayCost.toFixed(2),
+      monthlySpent: totalMonthlySpent.toFixed(2),
+      monthlyBudget: monthlyBudget.toFixed(2),
+      budgetProgress: budgetProgress.toFixed(1)
+    });
+  } catch (error) {
+    return NextResponse.json({ error: 'Failed to fetch status' }, { status: 500 });
+  }
+}
