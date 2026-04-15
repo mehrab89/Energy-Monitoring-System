@@ -1,0 +1,96 @@
+import { NextResponse } from 'next/server';
+import { auth } from '@/lib/auth';
+import connectToDatabase from '@/lib/mongodb';
+import Usage from '@/models/Usage';
+import Appliance from '@/models/Appliance';
+import User from '@/models/User';
+
+export async function GET() {
+  const session = await auth();
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  await connectToDatabase();
+  try {
+    // 1. Fetch real usage records
+    let records = await Usage.find({ userId: session.user.id })
+      .sort({ timestamp: -1 })
+      .limit(50);
+
+    // 2. If no records, generate simulated history for the last 7 days
+    if (records.length === 0) {
+      const appliances = await Appliance.find({ userId: session.user.id });
+      const user = await User.findById(session.user.id);
+      const unitRate = user?.unitRate || 0.12;
+
+      const simulatedRecords = [];
+      const now = new Date();
+
+      for (let i = 0; i < 20; i++) {
+        const date = new Date(now);
+        date.setDate(date.getDate() - i);
+        
+        let dailyTotalKw = 0;
+        
+        appliances.forEach(app => {
+          // Calculate scheduled hours
+          const [startH, startM] = app.startTime.split(':').map(Number);
+          const [endH, endM] = app.endTime.split(':').map(Number);
+          const startMin = startH * 60 + startM;
+          const endMin = endH * 60 + endM;
+          
+          let durationMin = 0;
+          if (startMin < endMin) {
+            durationMin = endMin - startMin;
+          } else {
+            durationMin = (1440 - startMin) + endMin;
+          }
+          
+          // Add some randomness to usage per day (80% - 120%)
+          const variability = 0.8 + (Math.random() * 0.4);
+          dailyTotalKw += (app.wattage / 1000) * (durationMin / 60) * variability;
+        });
+
+        simulatedRecords.push({
+          userId: session.user.id,
+          timestamp: date.toISOString(),
+          totalKw: parseFloat(dailyTotalKw.toFixed(2)),
+          cost: parseFloat((dailyTotalKw * unitRate).toFixed(2)),
+          isSimulated: true
+        });
+      }
+      records = simulatedRecords;
+    }
+
+    // 3. Calculate Stats
+    const totalUsage = records.reduce((acc, r) => acc + r.totalKw, 0);
+    const totalCost = records.reduce((acc, r) => acc + r.cost, 0);
+    
+    const avgUsage = (totalUsage / records.length).toFixed(2);
+    const avgMonthlyCost = ((totalCost / records.length) * 30).toFixed(2);
+    const peakUsage = Math.max(...records.map(r => r.totalKw)).toFixed(2);
+    const minUsage = Math.min(...records.map(r => r.totalKw)).toFixed(2);
+
+    // 4. Transform for Chart (Last 20 days, chronological order)
+    const chartData = [...records]
+      .slice(0, 20)
+      .reverse()
+      .map(r => ({
+        time: new Date(r.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' }),
+        usage: r.totalKw
+      }));
+
+    return NextResponse.json({
+      history: records,
+      stats: {
+        avgUsage,
+        avgMonthlyCost,
+        peakUsage,
+        minUsage,
+      },
+      chartData
+    });
+  } catch (error) {
+    console.error('History fetch error:', error);
+    return NextResponse.json({ error: 'Failed to fetch history' }, { status: 500 });
+  }
+}
