@@ -1,0 +1,136 @@
+'use client';
+import { useState, useEffect } from 'react';
+import { History as HistoryIcon, Calendar, ArrowUpRight, ArrowDownRight, Download, Loader2, DollarSign } from 'lucide-react';
+import StatCard from '@/components/StatCard';
+import UsageChart from '@/components/UsageChart';
+
+export default function HistoryPage() {
+  const [history, setHistory] = useState([]);
+  const [stats, setStats] = useState({ avgUsage: '0.00', peakUsage: '0.00', minUsage: '0.00' });
+  const [chartData, setChartData] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchHistory();
+  }, []);
+
+  async function fetchHistory() {
+    try {
+      const res = await fetch('/api/usage/history');
+      const data = await res.json();
+      if (!data.error) {
+        setHistory(data.history);
+        setStats(data.stats);
+        setChartData(data.chartData);
+      }
+    } catch (err) {
+      console.error('Failed to fetch history:', err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const exportCSV = () => {
+    const headers = ['Timestamp', 'Usage (kWh)', 'Cost ($)'];
+    const rows = history.map(h => [
+      new Date(h.timestamp).toLocaleString(),
+      h.totalKw,
+      h.cost
+    ]);
+    
+    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "energy_history.csv");
+    document.body.appendChild(link);
+    link.click();
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-[400px] flex items-center justify-center">
+        <Loader2 className="animate-spin text-indigo-500" size={40} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-8 animate-in fade-in duration-500 pb-12">
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight text-white">Usage History</h2>
+          <p className="text-slate-400">Detailed logs of your energy consumption</p>
+        </div>
+        <button 
+          onClick={exportCSV}
+          className="flex items-center gap-2 px-6 py-3 rounded-2xl bg-white/5 border border-white/10 text-white font-bold hover:bg-white/10 transition-all hover:scale-105 active:scale-95"
+        >
+          <Download size={20} />
+          Export CSV
+        </button>
+      </header>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <StatCard title="Weekly Average" value={stats.avgUsage} unit="kWh" icon={HistoryIcon} color="indigo" />
+        <StatCard title="Avg Monthly Cost" value={`$${stats.avgMonthlyCost}`} unit="" icon={DollarSign} color="green" />
+        <StatCard title="Peak Consumption" value={stats.peakUsage} unit="kWh" icon={ArrowUpRight} color="rose" />
+        <StatCard title="Lowest Consumption" value={stats.minUsage} unit="kWh" icon={ArrowDownRight} color="green" />
+      </div>
+
+      <div className="glass-card p-8">
+        <div className="flex justify-between items-center mb-8">
+          <h3 className="text-xl font-bold text-white flex items-center gap-2">
+            <Calendar size={24} className="text-indigo-400" />
+            Consumption Trends (Last 20 Days)
+          </h3>
+        </div>
+        <UsageChart data={chartData} />
+      </div>
+
+      <div className="glass-card overflow-hidden">
+        <div className="px-8 py-6 border-b border-white/5">
+          <h3 className="text-xl font-bold text-white">Recent Usage Logs</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="bg-white/5 text-left">
+                <th className="px-8 py-4 text-xs font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">Timestamp</th>
+                <th className="px-8 py-4 text-xs font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">Usage</th>
+                <th className="px-8 py-4 text-xs font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">Cost</th>
+                <th className="px-8 py-4 text-xs font-bold text-slate-400 uppercase tracking-widest text-right whitespace-nowrap">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {history.map((log, index) => (
+                <tr key={index} className="hover:bg-white/[0.02]">
+                  <td className="px-8 py-5 text-slate-300 font-medium whitespace-nowrap">
+                    {new Date(log.timestamp).toLocaleString()}
+                  </td>
+                  <td className="px-8 py-5 text-white font-bold">{log.totalKw} kWh</td>
+                  <td className="px-8 py-5 text-slate-400">${log.cost}</td>
+                  <td className="px-8 py-5 text-right">
+                    <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                      parseFloat(log.totalKw) > parseFloat(stats.avgUsage) * 1.5 ? 'bg-rose-500/10 text-rose-400' : 'bg-emerald-500/10 text-emerald-400'
+                    }`}>
+                      {parseFloat(log.totalKw) > parseFloat(stats.avgUsage) * 1.5 ? 'High' : 'Normal'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+              {history.length === 0 && (
+                <tr>
+                  <td colSpan="4" className="px-8 py-12 text-center text-slate-500 italic">
+                    No consumption history recorded yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
